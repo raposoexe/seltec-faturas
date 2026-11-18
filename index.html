@@ -158,6 +158,11 @@ body.sem-app header, body.sem-app .wrap{display:none}
 #modal textarea{font-size:13px}
 #toasts{position:fixed;left:50%;transform:translateX(-50%);bottom:84px;display:flex;flex-direction:column;gap:8px;z-index:30;width:min(92vw,420px)}
 .toast{background:#2b1d12;color:#fff;padding:11px 14px;border-radius:10px;font-size:14px;box-shadow:0 6px 20px rgba(0,0,0,.2)} .toast.erro{background:var(--erro)}
+.reemb-tag{color:var(--verde2);font-weight:600}
+.sel-reemb{width:auto;flex:0 0 auto;max-width:50%;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--borda);border-radius:8px;background:var(--card);color:var(--txt);min-height:34px}
+.tot-reemb{border-top:1px solid var(--borda);margin-top:6px;padding-top:8px}
+.venc-item .v.pos{color:var(--folha)}
+@media (max-width:760px){#nav a{font-size:9.5px;padding:6px 2px}}
 </style>
 </head>
 <body>
@@ -607,6 +612,9 @@ const ICONES = {
   esq:'<path d="M15 6l-6 6 6 6"/>', dir:'<path d="M9 6l6 6-6 6"/>',
   mais:'<path d="M12 5v14M5 12h14"/>',
   baixar:'<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+  reembolso:'<path d="M3 7h13a4 4 0 0 1 0 8H8"/><path d="M7 3 3 7l4 4"/><path d="M8 19h9"/>',
+  lixo:'<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  editar:'<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
 };
 const ic = (n, cls='') => `<svg class="ico ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONES[n]||''}</svg>`;
 
@@ -619,7 +627,7 @@ const CFG_PADRAO = {
   msgPermuta: 'Olá, {nome}!\nSegue o demonstrativo da permuta com a {empresa} referente a {mes}.\n\n{situacao}\n\nO PDF com o demonstrativo e a conta da Cemig vai em anexo.',
 };
 const S = { modo:'carregando', db:null, assets:null, downloads:null, clientes:{}, faturas:{}, cfg:{...CFG_PADRAO},
-  pdfMem:new Map(), contasCemig:{}, lote:[], carregado:{c:false,f:false,g:false}, aviso:'', comp:null, filtroStatus:'', busca:'' };
+  pdfMem:new Map(), contasCemig:{}, reembolsos:{}, reembolsoLotes:{}, lote:[], carregado:{c:false,f:false,g:false}, aviso:'', comp:null, filtroStatus:'', busca:'' };
 
 const $ = (s, el=document) => el.querySelector(s);
 const $$ = (s, el=document) => [...el.querySelectorAll(s)];
@@ -640,7 +648,7 @@ function fecharModal(){ $('#modal').hidden = true; $('#modal .card').innerHTML =
 
 function salvarLocal(){
   if (S.modo !== 'local') return;
-  try { localStorage.setItem('seltec-proto', JSON.stringify({clientes:S.clientes, faturas:S.faturas, cfg:S.cfg, contasCemig:S.contasCemig})); } catch(e){}
+  try { localStorage.setItem('seltec-proto', JSON.stringify({clientes:S.clientes, faturas:S.faturas, cfg:S.cfg, contasCemig:S.contasCemig, reembolsos:S.reembolsos, reembolsoLotes:S.reembolsoLotes})); } catch(e){}
 }
 async function gravar(col, id, dados){
   if (S.db){
@@ -676,6 +684,7 @@ function assinarDados(db){
   db.collection('clientes').onSnapshot(s => { S.clientes = Object.fromEntries(s.docs.map(d=>[d.id,{...d.data(), id:d.id}])); S.carregado.c=true; pronto(); atualizar(); }, erro);
   db.collection('faturas').onSnapshot(s => { S.faturas = Object.fromEntries(s.docs.map(d=>[d.id,{...d.data(), id:d.id}])); S.carregado.f=true; pronto(); atualizar(); }, erro);
   db.collection('contasCemig').onSnapshot(s => { S.contasCemig = Object.fromEntries(s.docs.map(d=>[d.id,{...d.data(), id:d.id}])); atualizar(); }, () => {});
+  for (const col of ['reembolsos','reembolsoLotes']) db.collection(col).onSnapshot(s => { S[col] = Object.fromEntries(s.docs.map(d=>[d.id,{...d.data(), id:d.id}])); atualizar(); }, () => {});
   db.doc('rotinas/ultima').onSnapshot(s => { S.rotina = s.exists ? s.data() : null; atualizar(); }, () => {});
   db.doc('config/empresa').onSnapshot(s => { S.cfg = {...CFG_PADRAO, ...(s.exists ? s.data() : {})}; S.carregado.g=true; atualizar(); }, erro);
 }
@@ -685,8 +694,8 @@ function modoLocal(){
   if (SN){ S.snapshot = SN.em; for (const [k,v] of Object.entries(SN.pdfs||{})) { try { S.pdfMem.set(k, b64ParaBytes(v)); } catch(e){} } if (SN.rotina) S.rotina = SN.rotina; }
   let d = null;
   try { d = JSON.parse(localStorage.getItem('seltec-proto') || 'null'); } catch(e){}
-  if (d){ S.clientes=d.clientes||{}; S.faturas=d.faturas||{}; S.cfg={...CFG_PADRAO,...(d.cfg||{})}; S.contasCemig=d.contasCemig||{}; }
-  else if (SN){ S.clientes = SN.clientes||{}; S.faturas = SN.faturas||{}; S.cfg = {...CFG_PADRAO, ...(SN.cfg||{})}; S.contasCemig = SN.contasCemig||{}; salvarLocal(); }
+  if (d){ S.clientes=d.clientes||{}; S.faturas=d.faturas||{}; S.cfg={...CFG_PADRAO,...(d.cfg||{})}; S.contasCemig=d.contasCemig||{}; S.reembolsos=d.reembolsos||{}; S.reembolsoLotes=d.reembolsoLotes||{}; }
+  else if (SN){ S.clientes = SN.clientes||{}; S.faturas = SN.faturas||{}; S.cfg = {...CFG_PADRAO, ...(SN.cfg||{})}; S.contasCemig = SN.contasCemig||{}; S.reembolsos = SN.reembolsos||{}; S.reembolsoLotes = SN.reembolsoLotes||{}; salvarLocal(); }
   S.carregado = {c:true,f:true,g:true}; render();
 }
 // Re-desenha só telas de consulta, para não apagar o que a pessoa está digitando
@@ -765,7 +774,7 @@ async function arquivarNoDrive(f){
 }
 
 /* ===== Navegação ===== */
-const ROTAS = [['painel','Painel','painel'],['nova','Nova fatura','nova'],['faturas','Faturas','faturas'],['permutas','Permutas','permutas'],['clientes','Clientes','clientes'],['config','Ajustes','ajustes']];
+const ROTAS = [['painel','Painel','painel'],['nova','Nova fatura','nova'],['faturas','Faturas','faturas'],['permutas','Permutas','permutas'],['clientes','Clientes','clientes'],['reembolsos','Reembolso','reembolso'],['config','Ajustes','ajustes']];
 const rota = () => { const h = location.hash.slice(1); return ROTAS.some(r=>r[0]===h) ? h : 'painel'; };
 function desenharTopo(){
   const r = rota();
@@ -779,7 +788,7 @@ function render(){
   const r = rota(), v = $('#view');
   if (S.aviso) v.innerHTML = `<div class="alerta">${esc(S.aviso)}</div>`; else v.innerHTML = '';
   if (S.modo === 'carregando' || (S.modo==='online' && !(S.carregado.c && S.carregado.f))){ v.innerHTML += '<div class="vazio">Carregando dados…</div>'; return; }
-  ({painel:telaPainel, nova:telaNova, faturas:telaFaturas, permutas:telaPermutas, clientes:telaClientes, config:telaConfig})[r](v);
+  ({painel:telaPainel, nova:telaNova, faturas:telaFaturas, permutas:telaPermutas, clientes:telaClientes, reembolsos:telaReembolsos, config:telaConfig})[r](v);
 }
 
 /* ===== Helpers de dados ===== */
@@ -1439,6 +1448,132 @@ function telaPermutas(v){
 }
 
 /* ===== Clientes ===== */
+/* ===== Reembolso ao Jomar ===== */
+// Contas e despesas que o Jomar pagou do bolso; a Seltec devolve em lotes ("reembolsos").
+const REEMB_DESDE = () => S.cfg.reembolsoDesde || '2026-11-01';
+const reembItens = () => Object.values(S.reembolsos||{});
+const reembAbertos = () => reembItens().filter(i => !i.loteId).sort((a,b)=>(a.vencimento||'9').localeCompare(b.vencimento||'9'));
+const nomeReemb = i => (i.clienteId && S.clientes[i.clienteId]?.nome) || i.descricao || '—';
+const novoIdReemb = p => p + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+async function gravarReemb(col, d){ S[col][d.id] = d; await gravar(col, d.id, d); }
+async function apagarReemb(col, id){ delete S[col][id]; await apagar(col, id); }
+function contaJaLancada(f){
+  const v = f.cemig?.total||0, dv = f.cemig?.vencimento;
+  return reembItens().some(i => i.contaRef === f.id || (i.clienteId && i.clienteId === f.clienteId && Math.abs((i.valor||0) - v) < 0.05
+    && (!i.vencimento || !dv || Math.abs(new Date(i.vencimento) - new Date(dv)) < 25*864e5)));
+}
+function sugestoesReembolso(){
+  const desde = REEMB_DESDE();
+  return todasContas().filter(f => S.clientes[f.clienteId]?.reembolsoJomar === 'sim' && f.status !== 'cancelada' && (f.cemig?.total||0) > 0
+      && (f.cemig?.vencimento||'') >= desde && !['retida','processando'].includes(f.situacaoCemig) && !contaJaLancada(f))
+    .sort((a,b) => a.cemig.vencimento.localeCompare(b.cemig.vencimento));
+}
+const itemDeConta = f => ({ id:novoIdReemb('r'), clienteId:f.clienteId, descricao:S.clientes[f.clienteId]?.nome||'', vencimento:f.cemig.vencimento,
+  valor:r2(f.cemig.total), competencia:f.competencia||'', contaRef:f.id, origem:'conta', loteId:null, criadoEm:new Date().toISOString() });
+
+function telaReembolsos(v){
+  const abertos = reembAbertos(), sug = sugestoesReembolso();
+  const lotes = Object.values(S.reembolsoLotes||{}).sort((a,b)=>(b.data||'').localeCompare(a.data||''));
+  const soma = arr => r2(arr.reduce((s,x)=>s+x,0));
+  const totAb = soma(abertos.map(i=>i.valor||0)), totSug = soma(sug.map(f=>f.cemig.total));
+  const cls = listaClientes();
+  const grupos = [['branco','A confirmar', cls.filter(c=>!c.reembolsoJomar)], ['sim','Entram no reembolso', cls.filter(c=>c.reembolsoJomar==='sim')], ['nao','Não reembolsam', cls.filter(c=>c.reembolsoJomar==='nao')]];
+  const ult = lotes[0];
+  const linhaItem = (i, editavel) => `<div class="venc-item ${editavel?'':'ok'}"><span class="quem"><b>${esc(nomeReemb(i))}</b><small>${i.vencimento?`vence ${isoParaBR(i.vencimento)}`:'sem vencimento'}${i.clienteId && i.descricao && !semAcento(nomeReemb(i)).toLowerCase().includes(semAcento(i.descricao).toLowerCase().trim())?` · na planilha: ${esc(i.descricao)}`:''}${i.obs?` · ${esc(i.obs)}`:''}</small></span>
+      <span class="v ${i.valor<0?'pos':''}">${brl(i.valor)}</span>${editavel?`<span class="acoes" style="margin:0"><button class="mini-btn" data-red="${i.id}" aria-label="Editar">${ic('editar')}</button><button class="mini-btn" data-rdel="${i.id}" aria-label="Remover">${ic('lixo')}</button></span>`:''}</div>`;
+  v.innerHTML += `<div class="cab"><h1>Reembolso ao Jomar</h1>
+    <div class="acoes" style="margin:0"><button class="btn sec" id="rAdd">${ic('mais')} Lançar despesa</button><button class="btn" id="rPagar" ${abertos.length?'':'disabled'}>${ic('check')} Registrar reembolso</button></div></div>
+  <p class="muted small">Contas Cemig e despesas que o Jomar pagou do bolso e a Seltec devolve para ele. Em cada cliente, marque se a conta dele entra no reembolso.</p>
+  <div class="kpis">
+    <div class="kpi alerta-kpi"><small>A reembolsar ao Jomar</small><b>${brl(totAb)}</b><span>${abertos.length} lançamento${abertos.length===1?'':'s'} em aberto</span></div>
+    <div class="kpi"><small>Contas novas para incluir</small><b>${brl(totSug)}</b><span>${sug.length} conta${sug.length===1?'':'s'} Cemig de clientes marcados</span></div>
+    <div class="kpi"><small>${ic('check')} Último reembolso</small><b>${ult?brl(ult.total):'—'}</b><span>${ult?`${isoParaBR(ult.data)}${ult.forma?' · '+esc(ult.forma):''}`:'nenhum ainda'}</span></div>
+    <div class="kpi"><small>Clientes a confirmar</small><b>${grupos[0][2].length}</b><span>sem marcação de reembolso</span></div>
+  </div>
+  <section class="card"><h2>Contas Cemig para incluir <span class="n">${sug.length}</span></h2>
+    ${sug.length ? `<p class="small">Contas de clientes marcados com "Reembolso ao Jomar" com vencimento a partir de ${isoParaBR(REEMB_DESDE())} que ainda não estão na lista.</p>
+      ${sug.map(f => `<div class="venc-item"><span class="quem"><b>${esc(S.clientes[f.clienteId]?.nome||'?')}</b><small>${f.competencia?compLabel(f.competencia)+' · ':''}vence ${isoParaBR(f.cemig.vencimento)} · ${cemigPaga(f)?'Cemig paga':'Cemig em aberto'}</small></span><span class="v">${brl(f.cemig.total)}</span><button class="mini-btn" data-inc="${esc(f.id)}">${ic('mais')} Incluir</button></div>`).join('')}
+      <div class="acoes"><button class="btn sec" id="rIncTodas">Incluir todas (${brl(totSug)})</button></div>`
+      : `<p class="ok">${ic('checkc')} Nenhuma conta nova de cliente marcado.</p>`}
+  </section>
+  <section class="card"><h2>Em aberto: a Seltec deve ao Jomar <span class="n">${abertos.length}</span></h2>
+    ${abertos.length ? abertos.map(i => linhaItem(i, true)).join('') + `<div class="venc-cab tot-reemb"><b>Total</b><span></span><span class="tot">${brl(totAb)}</span></div>`
+      : `<p class="ok">${ic('checkc')} Nada a reembolsar no momento.</p>`}
+  </section>
+  <section class="card"><h2>Reembolsos feitos <span class="n">${lotes.length}</span></h2>
+    ${lotes.length ? lotes.map(l => { const its = reembItens().filter(i=>i.loteId===l.id).sort((a,b)=>(a.vencimento||'9').localeCompare(b.vencimento||'9'));
+      return `<details><summary><b>${isoParaBR(l.data)}</b>${l.forma?` · ${esc(l.forma)}`:''} · ${its.length} lançamento${its.length===1?'':'s'} · <b>${brl(l.total)}</b></summary>
+        ${l.obs?`<p class="small">${esc(l.obs)}</p>`:''}${its.map(i => linhaItem(i, false)).join('')}
+        <div class="acoes"><button class="btn sec mini" data-desf="${l.id}">Desfazer este reembolso</button></div></details>`; }).join('')
+      : '<p class="muted">Nenhum reembolso registrado.</p>'}
+  </section>
+  <section class="card"><h2>Quem entra no reembolso</h2>
+    <p class="small">"Sim" quer dizer que o Jomar paga a conta Cemig desse cliente e a Seltec devolve. As contas novas desses clientes aparecem em "Contas Cemig para incluir".</p>
+    ${grupos.map(([k, tit, arr]) => `<details ${k==='branco'?'open':''}><summary><b>${tit}</b> · ${arr.length}</summary>
+      ${arr.length ? `<ul class="lista">${arr.map(c => `<li class="lin"><span><b>${esc(c.nome)}</b><span>${c.usina?'Usina · ':''}paga a Cemig: ${esc(limpaPagador(c.pagadorCemig)||'não informado')}</span></span>
+        <select class="sel-reemb" data-mr="${c.id}" aria-label="Reembolso de ${esc(c.nome)}">${[['','A confirmar'],['sim','Sim'],['nao','Não']].map(([o,t])=>`<option value="${o}" ${(c.reembolsoJomar||'')===o?'selected':''}>${t}</option>`).join('')}</select></li>`).join('')}</ul>` : '<p class="muted small">Ninguém.</p>'}</details>`).join('')}
+  </section>`;
+
+  $$('[data-inc]', v).forEach(b => b.onclick = async () => { b.disabled = true; const f = sug.find(x=>x.id===b.dataset.inc); if (!f) return;
+    await gravarReemb('reembolsos', itemDeConta(f)); toast('Conta incluída no reembolso'); render(); });
+  const it = $('#rIncTodas'); if (it) it.onclick = async () => { it.disabled = true; for (const f of sug) await gravarReemb('reembolsos', itemDeConta(f)); toast(`${sug.length} contas incluídas`); render(); };
+  $$('[data-rdel]', v).forEach(b => b.onclick = async () => { const i = S.reembolsos[b.dataset.rdel];
+    if (await confirmar(`Remover "${nomeReemb(i)}" (${brl(i.valor)}) da lista de reembolso?`, 'Remover')){ await apagarReemb('reembolsos', i.id); toast('Removido'); render(); } });
+  $$('[data-red]', v).forEach(b => b.onclick = () => editarItemReemb(S.reembolsos[b.dataset.red]));
+  $('#rAdd').onclick = () => editarItemReemb(null);
+  $('#rPagar').onclick = () => registrarReembolso();
+  $$('[data-desf]', v).forEach(b => b.onclick = async () => { const l = S.reembolsoLotes[b.dataset.desf];
+    if (!await confirmar(`Desfazer o reembolso de ${isoParaBR(l.data)} (${brl(l.total)})? Os lançamentos voltam para "em aberto".`, 'Desfazer')) return;
+    for (const i of reembItens().filter(i=>i.loteId===l.id)) await gravarReemb('reembolsos', {...i, loteId:null});
+    await apagarReemb('reembolsoLotes', l.id); toast('Reembolso desfeito'); render(); });
+  $$('[data-mr]', v).forEach(s => s.onchange = async () => { const c = S.clientes[s.dataset.mr]; s.disabled = true;
+    await gravarCliente({...c, reembolsoJomar:s.value, atualizadoEm:new Date().toISOString()}); toast(`${c.nome}: ${s.value==='sim'?'entra no reembolso':s.value==='nao'?'não reembolsa':'a confirmar'}`); render(); });
+}
+
+function editarItemReemb(i){
+  const novo = !i; i = i || {descricao:'', valor:'', vencimento:hojeISO(), clienteId:'', obs:''};
+  abrirModal(`<h3>${novo?'Lançar despesa do Jomar':'Editar lançamento'}</h3>
+  <form id="fRe" class="campos">
+    <label class="campo larg">Cliente (se for conta Cemig)<select name="clienteId"><option value="">Nenhum: outra despesa</option>${listaClientes().map(c=>`<option value="${c.id}" ${i.clienteId===c.id?'selected':''}>${esc(c.nome)}</option>`).join('')}</select></label>
+    <label class="campo larg">Descrição<input name="descricao" value="${esc(i.descricao)}" placeholder="Ex.: troca de pneus, Google Pro"></label>
+    <label class="campo">Valor (R$)<input name="valor" inputmode="decimal" required value="${i.valor!==''?fmtN(i.valor,2):''}" placeholder="Use negativo para crédito"></label>
+    <label class="campo">Vencimento<input name="vencimento" type="date" value="${i.vencimento||''}"></label>
+    <label class="campo larg">Observação<input name="obs" value="${esc(i.obs||'')}"></label>
+    <div class="acoes larg"><button type="button" class="btn sec" id="canc">Cancelar</button><button class="btn">Salvar</button></div>
+  </form>`);
+  const f = $('#fRe'); $('#canc').onclick = fecharModal;
+  f.onsubmit = async e => { e.preventDefault();
+    const valor = num(f.valor.value); if (valor === null || valor === undefined || isNaN(valor) || valor === 0){ toast('Informe o valor.', 'erro'); return; }
+    if (!f.clienteId.value && !f.descricao.value.trim()){ toast('Escolha um cliente ou escreva a descrição.', 'erro'); return; }
+    const d = {...(novo ? {id:novoIdReemb('r'), origem:'manual', loteId:null, criadoEm:new Date().toISOString()} : i),
+      clienteId:f.clienteId.value || null, descricao:f.descricao.value.trim() || S.clientes[f.clienteId.value]?.nome || '', valor:r2(valor), vencimento:f.vencimento.value, obs:f.obs.value.trim()};
+    await gravarReemb('reembolsos', d); fecharModal(); toast('Lançamento salvo'); render(); };
+}
+
+function registrarReembolso(){
+  const abertos = reembAbertos();
+  abrirModal(`<h3>Registrar reembolso ao Jomar</h3>
+  <form id="fRl" class="campos">
+    <label class="campo">Data do pagamento<input name="data" type="date" required value="${hojeISO()}"></label>
+    <label class="campo">Como foi pago<input name="forma" list="formasReemb" placeholder="Pix, Caju, EVA de Alyne, espécie…"><datalist id="formasReemb"><option>Pix</option><option>Caju</option><option>EVA de Alyne</option><option>Espécie</option><option>Transferência</option></datalist></label>
+    <label class="campo larg">Observação<input name="obs"></label>
+    <div class="larg"><p class="small">Marque o que está sendo pago agora:</p>
+      ${abertos.map(i => `<label class="check"><input type="checkbox" name="it" value="${i.id}" checked> ${esc(nomeReemb(i))} · ${i.vencimento?isoParaBR(i.vencimento):'s/ venc.'} · <b>${brl(i.valor)}</b></label>`).join('')}</div>
+    <p class="larg">Total: <b id="rlTot"></b></p>
+    <div class="acoes larg"><button type="button" class="btn sec" id="canc">Cancelar</button><button class="btn">Confirmar reembolso</button></div>
+  </form>`);
+  const f = $('#fRl'); $('#canc').onclick = fecharModal;
+  const marcados = () => $$('input[name=it]:checked', f).map(x => S.reembolsos[x.value]);
+  const tot = () => { $('#rlTot').textContent = brl(r2(marcados().reduce((s,i)=>s+i.valor,0))); }; tot();
+  $$('input[name=it]', f).forEach(x => x.onchange = tot);
+  f.onsubmit = async e => { e.preventDefault(); const its = marcados(); if (!its.length){ toast('Marque pelo menos um lançamento.', 'erro'); return; }
+    const l = {id:novoIdReemb('l'), data:f.data.value, forma:f.forma.value.trim(), obs:f.obs.value.trim(), total:r2(its.reduce((s,i)=>s+i.valor,0)), n:its.length, origem:'manual', criadoEm:new Date().toISOString()};
+    $('button.btn:not(.sec)', f).disabled = true;
+    await gravarReemb('reembolsoLotes', l);
+    for (const i of its) await gravarReemb('reembolsos', {...i, loteId:l.id});
+    fecharModal(); toast(`Reembolso de ${brl(l.total)} registrado`); render(); };
+}
+
 function telaClientes(v){
   const q = (S.busca||'').toLowerCase();
   const cs = listaClientes().filter(c => !q || [c.nome,c.uc,c.instalacao,c.titularCemig].join(' ').toLowerCase().includes(q));
@@ -1449,6 +1584,7 @@ function telaClientes(v){
   <div class="grade-cli">${cs.map(c => { const ult = faturasDoCliente(c.id)[0]; return `
     <button class="card cli" data-ed="${c.id}">
       <div class="lin"><b>${esc(c.nome)}</b><span class="chip ${c.tipo==='permuta'?'roxo':c.tipo==='venda'?'verde':'cinza'}">${c.usina?'Usina':TIPOS[c.tipo]||c.tipo}</span></div>
+      ${c.reembolsoJomar==='sim'?'<small class="reemb-tag">Reembolso ao Jomar</small>':''}
       <small>UC ${esc(c.uc||'—')}${c.instalacao?` · inst. ${esc(c.instalacao)}`:''}</small>
       <small>${c.whatsapp?`WhatsApp ${esc(c.whatsapp)}`:'<span class="falta">sem WhatsApp</span>'} · ${c.tipo==='venda'?`desconto ${c.desconto??30}%`:c.tipo==='permuta'?`limite ${c.permuta?.base==='kwh'?fmtN(c.permuta?.limite)+' kWh':brl(c.permuta?.limite)}`:''}</small>
       <small>${ult?`Última fatura: ${compLabel(ult.competencia)} · ${brl(ult.calc?.valorAPagar)}`:'Sem faturas'}</small>
@@ -1473,6 +1609,7 @@ function editarCliente(c, itemLote){
     <label class="campo">WhatsApp (com DDD)<input name="whatsapp" inputmode="tel" value="${esc(c.whatsapp||'')}" placeholder="33 99999-9999"></label>
     <label class="campo">Titular da conta Cemig<input name="titularCemig" value="${esc(c.titularCemig||cm?.titular||'')}"></label>
     <label class="campo">Quem paga a conta Cemig<input name="pagadorCemig" value="${esc(c.pagadorCemig||'')}" placeholder="Seltec, Jomar, o próprio cliente…"></label>
+    <label class="campo">Reembolso ao Jomar${sel('reembolsoJomar', c.reembolsoJomar||'', [['','A confirmar'],['sim','Sim: o Jomar paga e a Seltec reembolsa'],['nao','Não reembolsa']])}</label>
     <label class="campo">Responsável pelo controle<input name="responsavel" value="${esc(c.responsavel||'')}"></label>
     <label class="campo">Tipo${sel('tipo', c.tipo, Object.entries(TIPOS))}</label>
     <label class="campo">Desconto sobre a tarifa (%)<input name="desconto" inputmode="decimal" value="${c.desconto??30}"></label>
@@ -1510,7 +1647,7 @@ function editarCliente(c, itemLote){
     const uc = g('uc').value.trim();
     const id = (!novo && c.id) || ('uc' + soDigitos(uc));
     if (novo && S.clientes[id]){ toast('Já existe um cliente com essa UC.', 'erro'); return; }
-    const dados = { id, nome: g('nome').value.trim(), uc, instalacao: g('instalacao').value.trim(), endereco: g('endereco').value.trim(),
+    const dados = { ...(!novo ? c : {}), id, nome: g('nome').value.trim(), reembolsoJomar: g('reembolsoJomar').value, uc, instalacao: g('instalacao').value.trim(), endereco: g('endereco').value.trim(),
       whatsapp: g('whatsapp').value.trim(), titularCemig: g('titularCemig').value.trim(), pagadorCemig: g('pagadorCemig').value.trim(),
       responsavel: g('responsavel').value.trim(), tipo: g('tipo').value, desconto: num(g('desconto').value) ?? 30,
       inicioContrato: g('inicioContrato').value, economiaAnterior: num(g('economiaAnterior').value) || 0, cobrarTaxas: g('cobrarTaxas').checked, repassarContaInteira: g('repassarContaInteira').checked,
@@ -1901,7 +2038,7 @@ async function codigoDaPlataforma(){
   try { const r = await fetch(location.href.split('#')[0]); if (r.ok){ const t = await r.text(); if (t.includes('Seltec')) return t; } } catch(e){}
   return null;
 }
-const dadosJson = () => JSON.stringify({exportadoEm:new Date().toISOString(), clientes:S.clientes, faturas:S.faturas, contasCemig:S.contasCemig, cfg:S.cfg}, null, 1);
+const dadosJson = () => JSON.stringify({exportadoEm:new Date().toISOString(), clientes:S.clientes, faturas:S.faturas, contasCemig:S.contasCemig, reembolsos:S.reembolsos, reembolsoLotes:S.reembolsoLotes, cfg:S.cfg}, null, 1);
 
 async function salvarArquivo(nome, data){
   if (S.downloads){
@@ -1957,7 +2094,7 @@ async function baixarBackup(botao){
     if (cem) z.file(`pdfs/${f.id}_cemig.pdf`, cem);
   }
   if (S.cfg.logoId){ const l = await bytesDeAsset(S.cfg.logoId); if (l) z.file('logo.bin', l); }
-  z.file('dados.json', JSON.stringify({tipo:'backup-seltec', versao:1, exportadoEm:new Date().toISOString(), clientes:S.clientes, faturas:S.faturas, contasCemig:S.contasCemig, cfg:S.cfg}, null, 1));
+  z.file('dados.json', JSON.stringify({tipo:'backup-seltec', versao:1, exportadoEm:new Date().toISOString(), clientes:S.clientes, faturas:S.faturas, contasCemig:S.contasCemig, reembolsos:S.reembolsos, reembolsoLotes:S.reembolsoLotes, cfg:S.cfg}, null, 1));
   z.file('LEIA-ME.txt', `Backup da plataforma Seltec · Faturas e Permutas\nGerado em ${new Date().toLocaleString('pt-BR')}\n${Object.keys(S.clientes).length} clientes, ${fs.length} faturas.\nPara restaurar: abra a plataforma, vá em Ajustes → Restaurar backup e escolha este arquivo .zip.`);
   prog('Compactando…');
   const blob = await z.generateAsync({type:'blob', compression:'DEFLATE'});
@@ -1970,9 +2107,9 @@ async function restaurarBackup(arq){
     if (/\.zip$/i.test(arq.name)){ z = await JSZip.loadAsync(arq); const dj = z.file('dados.json'); if (!dj) throw new Error('sem dados.json'); dados = JSON.parse(await dj.async('string')); }
     else dados = JSON.parse(await arq.text());
   } catch(e){ toast('Arquivo de backup inválido.', 'erro'); return; }
-  const cs = Object.values(dados.clientes||{}), fs = Object.values(dados.faturas||{}), ccs = Object.values(dados.contasCemig||{});
+  const cs = Object.values(dados.clientes||{}), fs = Object.values(dados.faturas||{}), ccs = Object.values(dados.contasCemig||{}), rs = Object.values(dados.reembolsos||{}), rls = Object.values(dados.reembolsoLotes||{});
   const comPdf = z ? Object.keys(z.files).filter(n=>n.startsWith('pdfs/')).length : 0;
-  if (!await confirmar(`Restaurar ${cs.length} clientes, ${fs.length} faturas${ccs.length?` e ${ccs.length} contas Cemig`:''}${comPdf?` com ${comPdf} PDFs`:''}? Registros com o mesmo código serão substituídos.${dados.cfg?' Os ajustes da empresa também serão restaurados.':''}`, 'Restaurar')) return;
+  if (!await confirmar(`Restaurar ${cs.length} clientes, ${fs.length} faturas${ccs.length?`, ${ccs.length} contas Cemig`:''}${rs.length?` e ${rs.length} lançamentos de reembolso`:''}${comPdf?` com ${comPdf} PDFs`:''}? Registros com o mesmo código serão substituídos.${dados.cfg?' Os ajustes da empresa também serão restaurados.':''}`, 'Restaurar')) return;
   const aviso = document.createElement('div'); aviso.className = 'toast'; aviso.textContent = 'Restaurando…'; $('#toasts').appendChild(aviso);
   try {
     for (const c of cs) await gravarCliente(c);
@@ -1991,6 +2128,8 @@ async function restaurarBackup(arq){
     }
     let j = 0;
     for (const c of ccs){ aviso.textContent = `Restaurando contas Cemig… ${++j}/${ccs.length}`; S.contasCemig[c.id] = c; await gravar('contasCemig', c.id, c); }
+    let k = 0;
+    for (const [col, arr] of [['reembolsoLotes', rls], ['reembolsos', rs]]) for (const d of arr){ aviso.textContent = `Restaurando reembolsos… ${++k}/${rs.length+rls.length}`; S[col][d.id] = d; await gravar(col, d.id, d); }
     if (dados.cfg){
       const cfg = {...dados.cfg};
       const logo = z && z.file('logo.bin');
