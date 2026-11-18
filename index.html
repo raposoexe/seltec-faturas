@@ -163,6 +163,8 @@ body.sem-app header, body.sem-app .wrap{display:none}
 .tot-reemb{border-top:1px solid var(--borda);margin-top:6px;padding-top:8px}
 .venc-item .v.pos{color:var(--folha)}
 @media (max-width:760px){#nav a{font-size:9.5px;padding:6px 2px}}
+.lista-imp{max-height:46vh;overflow:auto;border:1px solid var(--borda);border-radius:10px;padding:2px 10px;margin:8px 0}
+.lista-imp .venc-item{cursor:pointer;border-bottom:1px solid var(--borda)}
 </style>
 </head>
 <body>
@@ -1482,7 +1484,7 @@ function telaReembolsos(v){
   const linhaItem = (i, editavel) => `<div class="venc-item ${editavel?'':'ok'}"><span class="quem"><b>${esc(nomeReemb(i))}</b><small>${i.vencimento?`vence ${isoParaBR(i.vencimento)}`:'sem vencimento'}${i.clienteId && i.descricao && !semAcento(nomeReemb(i)).toLowerCase().includes(semAcento(i.descricao).toLowerCase().trim())?` · na planilha: ${esc(i.descricao)}`:''}${i.obs?` · ${esc(i.obs)}`:''}</small></span>
       <span class="v ${i.valor<0?'pos':''}">${brl(i.valor)}</span>${editavel?`<span class="acoes" style="margin:0"><button class="mini-btn" data-red="${i.id}" aria-label="Editar">${ic('editar')}</button><button class="mini-btn" data-rdel="${i.id}" aria-label="Remover">${ic('lixo')}</button></span>`:''}</div>`;
   v.innerHTML += `<div class="cab"><h1>Reembolso ao Jomar</h1>
-    <div class="acoes" style="margin:0"><button class="btn sec" id="rAdd">${ic('mais')} Lançar despesa</button><button class="btn" id="rPagar" ${abertos.length?'':'disabled'}>${ic('check')} Registrar reembolso</button></div></div>
+    <div class="acoes" style="margin:0"><button class="btn sec" id="rImp">${ic('faturas')} Imprimir contas do Jomar</button><button class="btn sec" id="rAdd">${ic('mais')} Lançar despesa</button><button class="btn" id="rPagar" ${abertos.length?'':'disabled'}>${ic('check')} Registrar reembolso</button></div></div>
   <p class="muted small">Contas Cemig e despesas que o Jomar pagou do bolso e a Seltec devolve para ele. Em cada cliente, marque se a conta dele entra no reembolso.</p>
   <div class="kpis">
     <div class="kpi alerta-kpi"><small>A reembolsar ao Jomar</small><b>${brl(totAb)}</b><span>${abertos.length} lançamento${abertos.length===1?'':'s'} em aberto</span></div>
@@ -1521,6 +1523,7 @@ function telaReembolsos(v){
     if (await confirmar(`Remover "${nomeReemb(i)}" (${brl(i.valor)}) da lista de reembolso?`, 'Remover')){ await apagarReemb('reembolsos', i.id); toast('Removido'); render(); } });
   $$('[data-red]', v).forEach(b => b.onclick = () => editarItemReemb(S.reembolsos[b.dataset.red]));
   $('#rAdd').onclick = () => editarItemReemb(null);
+  $('#rImp').onclick = () => imprimirContasJomar();
   $('#rPagar').onclick = () => registrarReembolso();
   $$('[data-desf]', v).forEach(b => b.onclick = async () => { const l = S.reembolsoLotes[b.dataset.desf];
     if (!await confirmar(`Desfazer o reembolso de ${isoParaBR(l.data)} (${brl(l.total)})? Os lançamentos voltam para "em aberto".`, 'Desfazer')) return;
@@ -1572,6 +1575,151 @@ function registrarReembolso(){
     await gravarReemb('reembolsoLotes', l);
     for (const i of its) await gravarReemb('reembolsos', {...i, loteId:l.id});
     fecharModal(); toast(`Reembolso de ${brl(l.total)} registrado`); render(); };
+}
+
+/* ===== Contas Cemig do Jomar para imprimir ===== */
+// Junta num PDF só as contas Cemig que o Jomar paga, com o nome do cliente no topo de cada página.
+const pagaJomar = (c, f) => !!c && (c.reembolsoJomar === 'sim' || /jomar/i.test(c.pagadorCemig || '') || (!c.reembolsoJomar && /jomar/i.test(f?.pagadorPlanilha || '')));
+const idDriveDeLink = l => (String(l||'').match(/\/d\/([\w-]{10,})/) || [])[1] || null;
+function contasDoJomar(mes){
+  const extras = Object.values(S.extraJomar || {});
+  return [...todasContas(), ...extras].filter(f => f.status !== 'cancelada' && (f.cemig?.total||0) > 0 && (f.cemig?.vencimento||'').startsWith(mes)
+      && pagaJomar(S.clientes[f.clienteId], f))
+    .sort((a,b) => a.cemig.vencimento.localeCompare(b.cemig.vencimento) || (S.clientes[a.clienteId]?.nome||'').localeCompare(S.clientes[b.clienteId]?.nome||'', 'pt-BR'));
+}
+function fontePdfConta(f){
+  if (S.pdfMem.has('cemig_'+f.id) || f.cemigPdfId) return 'ok';
+  if (S.mcp && (f.driveCemigId || idDriveDeLink(f.pdfLink))) return 'drive';
+  if (S.mcp && dcfg().pastaCemig?.id) return 'pasta';
+  return 'sem';
+}
+async function obterPdfConta(f){
+  if (S.pdfMem.has('cemig_'+f.id)) return S.pdfMem.get('cemig_'+f.id);
+  if (f.cemigPdfId){ const b = await lerAsset(f.cemigPdfId); if (b) return b; }
+  if (!S.mcp) return null;
+  const ids = [f.driveCemigId, idDriveDeLink(f.pdfLink)].filter(Boolean);
+  if (!ids.length && dcfg().pastaCemig?.id){
+    if (!S.listaPastaCemig) S.listaPastaCemig = await listarPdfsDrive(dcfg().pastaCemig.id).catch(() => []);
+    const c = S.clientes[f.clienteId] || {}, chaves = [soDigitos(c.instalacao), soDigitos(c.uc)].filter(x => x && x.length >= 7);
+    const cand = S.listaPastaCemig.filter(a => !/seltec/i.test(a.title||'') && chaves.some(k => soDigitos(a.title).includes(k)));
+    const ach = cand.find(a => f.competencia && (a.title||'').includes(f.competencia)) || cand[0];
+    if (ach) ids.push(ach.id);
+  }
+  for (const id of ids){ try { const b = await baixarDrive(id); S.pdfMem.set('cemig_'+f.id, b); return b; } catch(e){} }
+  return null;
+}
+
+function imprimirContasJomar(){
+  const st = S.impJ || (S.impJ = {mes: hojeISO().slice(0,7), soAbertas: true, desmarcadas: new Set()});
+  const desenhar = () => {
+    const todas = contasDoJomar(st.mes);
+    const lista = todas.filter(f => !st.soAbertas || cemigEmAberto(f) || f.manual);
+    const sel = lista.filter(f => !st.desmarcadas.has(f.id));
+    const tot = r2(sel.reduce((s,f)=>s+f.cemig.total,0)), totR = r2(sel.filter(f=>S.clientes[f.clienteId]?.reembolsoJomar==='sim').reduce((s,f)=>s+f.cemig.total,0));
+    const chipPdf = f => ({ok:'<span class="chip verde">PDF ok</span>', drive:'<span class="chip azul">PDF no Drive</span>', pasta:'<span class="chip amarelo">procurar no Drive</span>', sem:'<span class="chip vermelho">sem PDF</span>'})[fontePdfConta(f)];
+    abrirModal(`<h3>Contas Cemig do Jomar para imprimir</h3>
+      <p class="small">Contas dos clientes em que o Jomar paga a Cemig. O PDF sai com uma folha de resumo (lista e total) e, em cada conta, uma faixa no topo com o nome do cliente.</p>
+      <div class="campos"><label class="campo">Vencimentos do mês<input type="month" id="ijMes" value="${st.mes}"></label>
+        <label class="check" style="align-self:end"><input type="checkbox" id="ijAb" ${st.soAbertas?'checked':''}> Só as que ainda não foram pagas</label></div>
+      ${lista.length ? `<div class="lista-imp">${lista.map(f => { const c = S.clientes[f.clienteId]||{}; return `<label class="venc-item"><input type="checkbox" data-ij="${esc(f.id)}" ${st.desmarcadas.has(f.id)?'':'checked'}>
+        <span class="quem"><b>${esc(c.nome||f.nomeAvulso||'?')}</b><small>UC ${esc(c.uc||'—')} · vence ${isoParaBR(f.cemig.vencimento)}${c.reembolsoJomar==='sim'?' · reembolsar':''}${cemigPaga(f)?' · já paga':''}</small></span>
+        <span class="v">${brl(f.cemig.total)}</span>${chipPdf(f)}</label>`; }).join('')}</div>
+        <p>Selecionadas: <b>${sel.length}</b> · Total <b>${brl(tot)}</b>${totR?` · a reembolsar ao Jomar ${brl(totR)}`:''}</p>`
+        : `<p class="muted">Nenhuma conta do Jomar com vencimento em ${compLabel(st.mes)}${st.soAbertas?' em aberto':''}.</p>`}
+      ${!S.mcp ? '<p class="small">Fora do Claude a plataforma não busca PDFs no Drive: use "Adicionar PDFs" com as contas baixadas do Cemig Atende ou da pasta do Grok.</p>' : ''}
+      <div class="acoes"><label class="btn sec">${ic('mais')} Adicionar PDFs das contas<input type="file" id="ijArq" accept="application/pdf" multiple hidden></label>
+        <button type="button" class="btn sec" id="ijFechar">Fechar</button><button type="button" class="btn" id="ijGerar" ${sel.length?'':'disabled'}>${ic('baixar')} Gerar PDF para imprimir</button></div>
+      <p class="small muted" id="ijProg"></p>`);
+    $('#ijMes').onchange = e => { st.mes = e.target.value || st.mes; st.desmarcadas.clear(); desenhar(); };
+    $('#ijAb').onchange = e => { st.soAbertas = e.target.checked; desenhar(); };
+    $$('[data-ij]').forEach(x => x.onchange = () => { x.checked ? st.desmarcadas.delete(x.dataset.ij) : st.desmarcadas.add(x.dataset.ij); desenhar(); });
+    $('#ijFechar').onclick = () => { fecharModal(); render(); };
+    $('#ijArq').onchange = async e => { const prog = $('#ijProg'); let ok = 0, falha = [];
+      for (const arq of e.target.files){ prog.textContent = `Lendo ${arq.name}…`;
+        try { const bytes = new Uint8Array(await arq.arrayBuffer()); const cm = lerContaCemig(await extrairLinhasPdf(bytes));
+          const cli = acharClientePorUC(cm.uc); const f0 = cli && contasDoJomar((cm.vencimento||st.mes).slice(0,7)).find(f => f.clienteId === cli.id && (f.cemig.vencimento === cm.vencimento || f.competencia === cm.competencia));
+          let f = f0;
+          if (!f){ const id = 'man:' + soDigitos(cm.uc) + '_' + (cm.competencia||'');
+            f = {id, manual:true, clienteId: cli?.id || '', nomeAvulso: cli ? '' : `UC ${cm.uc} (${cm.titular||'não cadastrada'})`, competencia: cm.competencia, status:'gerada', cemig:{total: cm.total, vencimento: cm.vencimento, uc: cm.uc}};
+            (S.extraJomar = S.extraJomar || {})[id] = f;
+            if (!cli) falha.push(`${arq.name}: UC ${cm.uc} não está cadastrada`); else if (!pagaJomar(cli, f)) falha.push(`${arq.name}: ${cli.nome} não está marcado como pago pelo Jomar`); }
+          S.pdfMem.set('cemig_'+f.id, bytes); ok++;
+          if (f.cemig.vencimento && !f.cemig.vencimento.startsWith(st.mes) && ok === 1 && !f0) st.mes = f.cemig.vencimento.slice(0,7);
+        } catch(err){ falha.push(`${arq.name}: ${err.message||'não li'}`); } }
+      desenhar(); toast(`${ok} PDF${ok===1?'':'s'} adicionado${ok===1?'':'s'}`); if (falha.length) toast(falha.join(' · '), 'erro'); };
+    $('#ijGerar').onclick = async () => { const b = $('#ijGerar'), prog = $('#ijProg'); b.disabled = true;
+      try { const itens = [];
+        for (const [i,f] of sel.entries()){ prog.textContent = `Buscando PDFs… ${i+1}/${sel.length}`; let bytes = null; try { bytes = await obterPdfConta(f); } catch(e){} itens.push({f, bytes}); }
+        prog.textContent = 'Montando o PDF…';
+        const pdf = await gerarPdfContasJomar(itens, st.mes);
+        const sem = itens.filter(x=>!x.bytes).length;
+        if (await salvarArquivo(`contas-cemig-jomar-${st.mes}.pdf`, new Blob([pdf], {type:'application/pdf'}))) toast(`PDF pronto: ${itens.length - sem} conta${itens.length-sem===1?'':'s'}${sem?` (${sem} sem PDF, só na folha de resumo)`:''}`);
+        prog.textContent = sem ? `${sem} conta${sem>1?'s':''} sem PDF: aparecem só na folha de resumo. Adicione os PDFs e gere de novo.` : '';
+      } catch(e){ toast('Não consegui montar o PDF: ' + (e.message||e), 'erro'); prog.textContent = ''; }
+      b.disabled = false; };
+  };
+  desenhar();
+}
+
+async function gerarPdfContasJomar(itens, mes){
+  const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  const pdf = await PDFDocument.create();
+  const F = await pdf.embedFont(StandardFonts.Helvetica), B = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const LAR = rgb(.94,.52,.13), ESC = rgb(.16,.11,.08), CIN = rgb(.42,.37,.33), FAIXA = rgb(1,.95,.89), LIN = rgb(.9,.86,.82);
+  const lat = s => String(s ?? '').replace(/ /g,' ').replace(/[^\x20-\x7E -ÿ–—]/g,'');
+  const T = (p, s, x, y, o={}) => p.drawText(lat(s), {x, y, size:o.size||10, font:o.b?B:F, color:o.c||ESC});
+  const TR = (p, s, xr, y, o={}) => { const t = lat(s), f = o.b?B:F, sz = o.size||10; p.drawText(t, {x: xr - f.widthOfTextAtSize(t, sz), y, size:sz, font:f, color:o.c||ESC}); };
+  const corta = (s, w, sz, f=F) => { s = lat(s); while (s.length > 3 && f.widthOfTextAtSize(s, sz) > w) s = s.slice(0,-2); return s; };
+  const nomeDe = f => S.clientes[f.clienteId]?.nome || f.nomeAvulso || '?';
+  const ucDe = f => S.clientes[f.clienteId]?.uc || f.cemig?.uc || '—';
+  const reemb = f => S.clientes[f.clienteId]?.reembolsoJomar === 'sim';
+  // Folha de resumo
+  const W = 595.28, H = 841.89; let pg, y;
+  const novaCapa = cont => { pg = pdf.addPage([W, H]); pg.drawRectangle({x:0, y:H-8, width:W, height:8, color:LAR}); y = H - 50;
+    T(pg, cont ? 'Contas Cemig para o Jomar pagar (continuação)' : 'Contas Cemig para o Jomar pagar', 40, y, {size:17, b:true}); y -= 20;
+    T(pg, `Vencimentos de ${compLabel(mes)} · ${S.cfg.empresa || 'Seltec'} · gerado em ${new Date().toLocaleDateString('pt-BR')}`, 40, y, {size:9.5, c:CIN}); y -= 28;
+    pg.drawRectangle({x:36, y:y-6, width:W-72, height:20, color:ESC});
+    for (const [t,x,al] of [['#',44],['Cliente',62],['UC',272],['Vencimento',362],['Valor',478,'r'],['Reembolsar',W-44,'r']]) al ? TR(pg,t,x,y,{size:8.5,b:true,c:rgb(1,1,1)}) : T(pg,t,x,y,{size:8.5,b:true,c:rgb(1,1,1)});
+    y -= 24; };
+  novaCapa(false);
+  itens.forEach(({f, bytes}, i) => {
+    if (y < 120) novaCapa(true);
+    if (i % 2) pg.drawRectangle({x:36, y:y-6, width:W-72, height:19, color:rgb(.985,.97,.955)});
+    T(pg, String(i+1), 44, y, {size:9, c:CIN}); T(pg, corta(nomeDe(f), 200, 9.5, B), 62, y, {size:9.5, b:true});
+    T(pg, ucDe(f), 272, y, {size:8.5}); T(pg, isoParaBR(f.cemig.vencimento), 362, y, {size:9});
+    TR(pg, brl(f.cemig.total), 478, y, {size:9.5, b:true}); TR(pg, reemb(f) ? 'Sim' : 'Não', W-44, y, {size:9});
+    if (!bytes) T(pg, 'sem PDF', 486, y, {size:7, c:rgb(.75,.15,.1)});
+    y -= 19; });
+  const tot = r2(itens.reduce((s,x)=>s+x.f.cemig.total,0)), totR = r2(itens.filter(x=>reemb(x.f)).reduce((s,x)=>s+x.f.cemig.total,0));
+  if (y < 150) novaCapa(true);
+  pg.drawLine({start:{x:36,y:y+8}, end:{x:W-36,y:y+8}, thickness:1, color:LIN}); y -= 12;
+  T(pg, `Total (${itens.length} conta${itens.length===1?'':'s'})`, 62, y, {size:11, b:true}); TR(pg, brl(tot), 478, y, {size:12, b:true}); y -= 18;
+  T(pg, 'Destas, a Seltec reembolsa ao Jomar', 62, y, {size:9.5, c:CIN}); TR(pg, brl(totR), 478, y, {size:10, b:true}); y -= 34;
+  T(pg, 'Pago em: ____/____/________     Conferido por: ______________________________', 62, y, {size:9.5, c:CIN});
+  const sem = itens.filter(x=>!x.bytes);
+  if (sem.length){ y -= 26; let lin = `${sem.length} conta${sem.length>1?'s':''} sem PDF neste arquivo (baixar no Cemig Atende): `;
+    for (const pal of sem.map(x=>nomeDe(x.f)).join(', ').split(' ')){ if (F.widthOfTextAtSize(lat(lin+pal), 8.5) > W-110){ if (y < 50){ novaCapa(true); } T(pg, lin, 62, y, {size:8.5, c:rgb(.75,.15,.1)}); y -= 12; lin = ''; } lin += pal + ' '; }
+    if (lin.trim()) T(pg, lin, 62, y, {size:8.5, c:rgb(.75,.15,.1)}); }
+  // Contas, com o nome do cliente no topo de cada página
+  let n = 0;
+  for (const {f, bytes} of itens){ n++;
+    if (!bytes) continue;
+    let src; try { src = await PDFDocument.load(bytes, {ignoreEncryption:true}); } catch(e){ continue; }
+    let idx = null; try { idx = lerContaCemig(await extrairLinhasPdf(bytes)).paginasCemig; } catch(e){}
+    const pags = (idx && idx.length ? idx : src.getPageIndices()).map(i => src.getPage(i));
+    let emb = null; try { emb = await pdf.embedPages(pags); } catch(e){}
+    for (let k = 0; k < pags.length; k++){
+      const {width:w, height:h} = pags[k].getSize(), faixa = 40;
+      let np;
+      if (emb){ np = pdf.addPage([w, h]); const s = (h - faixa - 4) / h; np.drawPage(emb[k], {x:(w - w*s)/2, y:0, xScale:s, yScale:s}); }
+      else { [np] = await pdf.copyPages(src, [src.getPages().indexOf(pags[k])]); pdf.addPage(np); }
+      np.drawRectangle({x:0, y:h-faixa, width:w, height:faixa, color:FAIXA}); np.drawRectangle({x:0, y:h-faixa, width:7, height:faixa, color:LAR});
+      T(np, corta('CLIENTE: ' + nomeDe(f), w-150, 13, B), 16, h-18, {size:13, b:true});
+      TR(np, `Conta ${n} de ${itens.length}`, w-14, h-17, {size:8.5, c:CIN});
+      T(np, `UC ${ucDe(f)} · vence ${isoParaBR(f.cemig.vencimento)} · ${brl(f.cemig.total)} · ${reemb(f) ? 'Jomar paga e a Seltec reembolsa' : 'Jomar paga'}${pags.length>1?` · página ${k+1}/${pags.length}`:''}`, 16, h-32, {size:8.5, c:CIN});
+    }
+  }
+  return await pdf.save();
 }
 
 function telaClientes(v){
