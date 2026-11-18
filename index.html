@@ -619,7 +619,7 @@ const CFG_PADRAO = {
   msgPermuta: 'Olá, {nome}!\nSegue o demonstrativo da permuta com a {empresa} referente a {mes}.\n\n{situacao}\n\nO PDF com o demonstrativo e a conta da Cemig vai em anexo.',
 };
 const S = { modo:'carregando', db:null, assets:null, downloads:null, clientes:{}, faturas:{}, cfg:{...CFG_PADRAO},
-  pdfMem:new Map(), lote:[], carregado:{c:false,f:false,g:false}, aviso:'', comp:null, filtroStatus:'', busca:'' };
+  pdfMem:new Map(), contasCemig:{}, lote:[], carregado:{c:false,f:false,g:false}, aviso:'', comp:null, filtroStatus:'', busca:'' };
 
 const $ = (s, el=document) => el.querySelector(s);
 const $$ = (s, el=document) => [...el.querySelectorAll(s)];
@@ -640,7 +640,7 @@ function fecharModal(){ $('#modal').hidden = true; $('#modal .card').innerHTML =
 
 function salvarLocal(){
   if (S.modo !== 'local') return;
-  try { localStorage.setItem('seltec-proto', JSON.stringify({clientes:S.clientes, faturas:S.faturas, cfg:S.cfg})); } catch(e){}
+  try { localStorage.setItem('seltec-proto', JSON.stringify({clientes:S.clientes, faturas:S.faturas, cfg:S.cfg, contasCemig:S.contasCemig})); } catch(e){}
 }
 async function gravar(col, id, dados){
   if (S.db){
@@ -675,6 +675,7 @@ function assinarDados(db){
   const erro = e => { clearTimeout(timer); S.aviso = 'Não foi possível ler os dados (' + (e.code||e.message) + ').'; render(); };
   db.collection('clientes').onSnapshot(s => { S.clientes = Object.fromEntries(s.docs.map(d=>[d.id,{...d.data(), id:d.id}])); S.carregado.c=true; pronto(); atualizar(); }, erro);
   db.collection('faturas').onSnapshot(s => { S.faturas = Object.fromEntries(s.docs.map(d=>[d.id,{...d.data(), id:d.id}])); S.carregado.f=true; pronto(); atualizar(); }, erro);
+  db.collection('contasCemig').onSnapshot(s => { S.contasCemig = Object.fromEntries(s.docs.map(d=>[d.id,{...d.data(), id:d.id}])); atualizar(); }, () => {});
   db.doc('rotinas/ultima').onSnapshot(s => { S.rotina = s.exists ? s.data() : null; atualizar(); }, () => {});
   db.doc('config/empresa').onSnapshot(s => { S.cfg = {...CFG_PADRAO, ...(s.exists ? s.data() : {})}; S.carregado.g=true; atualizar(); }, erro);
 }
@@ -684,8 +685,8 @@ function modoLocal(){
   if (SN){ S.snapshot = SN.em; for (const [k,v] of Object.entries(SN.pdfs||{})) { try { S.pdfMem.set(k, b64ParaBytes(v)); } catch(e){} } if (SN.rotina) S.rotina = SN.rotina; }
   let d = null;
   try { d = JSON.parse(localStorage.getItem('seltec-proto') || 'null'); } catch(e){}
-  if (d){ S.clientes=d.clientes||{}; S.faturas=d.faturas||{}; S.cfg={...CFG_PADRAO,...(d.cfg||{})}; }
-  else if (SN){ S.clientes = SN.clientes||{}; S.faturas = SN.faturas||{}; S.cfg = {...CFG_PADRAO, ...(SN.cfg||{})}; salvarLocal(); }
+  if (d){ S.clientes=d.clientes||{}; S.faturas=d.faturas||{}; S.cfg={...CFG_PADRAO,...(d.cfg||{})}; S.contasCemig=d.contasCemig||{}; }
+  else if (SN){ S.clientes = SN.clientes||{}; S.faturas = SN.faturas||{}; S.cfg = {...CFG_PADRAO, ...(SN.cfg||{})}; S.contasCemig = SN.contasCemig||{}; salvarLocal(); }
   S.carregado = {c:true,f:true,g:true}; render();
 }
 // Re-desenha só telas de consulta, para não apagar o que a pessoa está digitando
@@ -799,7 +800,21 @@ const somaMes = (c, n) => { const [y,m] = c.split('-').map(Number); const d = ne
 const ehCobravel = f => f.calc?.tipo !== 'so_cemig' && f.status !== 'cancelada' && (f.calc?.valorAPagar||0) > 0;
 const estaVencida = f => ehCobravel(f) && f.status !== 'paga' && f.vencimento && f.vencimento < hojeISO();
 const cemigPaga = f => !!f.cemigPagaEm;
-const quemPagaCemig = f => (S.clientes[f.clienteId]?.pagadorCemig || 'Não informado').trim() || 'Não informado';
+const limpaPagador = s => String(s||'').replace(/\[A DEFINIR[^\]]*\]/i,'A definir').replace(/\s*\(.*?\)\s*/g,' ').trim();
+const quemPagaCemig = f => { const cad = limpaPagador(S.clientes[f.clienteId]?.pagadorCemig), pl = limpaPagador(f.pagadorPlanilha);
+  const p = cad && !/a definir/i.test(cad) ? cad : (pl || cad); return p ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase().replace(/\bseltec\b/,'Seltec') : 'Não informado'; };
+const SIT_CEMIG = {retida:'Retida na Cemig', debito_automatico:'Débito automático', processando:'Em processamento', confirmar:'Confirmar pagamento'};
+const cemigEmAberto = f => !cemigPaga(f) && (f.cemig?.total||0) > 0 && !['retida','debito_automatico','processando'].includes(f.situacaoCemig);
+const cemigAtrasada = f => cemigEmAberto(f) && f.cemig?.vencimento && f.cemig.vencimento < hojeISO();
+// Contas Cemig vindas da planilha, sem repetir as que já viraram fatura na plataforma
+function contasComoFaturas(){
+  const reais = Object.values(S.faturas);
+  return Object.values(S.contasCemig||{}).filter(c => !reais.some(f => f.clienteId===c.clienteId && f.cemig?.vencimento && f.cemig.vencimento===c.vencimento && Math.abs((f.cemig.total||0)-(c.valor||0)) < 0.05))
+    .map(c => ({ id:'cc:'+c.id, ccId:c.id, clienteId:c.clienteId, competencia:c.competencia, vencimento:c.vencimento, status:'sem_cobranca',
+      calc:{tipo:'so_cemig', valorAPagar:0, total:0, kwh:0, economia:0}, cemig:{total:c.valor, vencimento:c.vencimento},
+      cemigPagaEm: c.situacao==='paga' ? (c.pagaEm||'sim') : null, situacaoCemig:c.situacao, pagadorPlanilha:c.pagador, pdfLink:c.pdf, origem:'planilha' }));
+}
+const todasContas = () => [...Object.values(S.faturas), ...contasComoFaturas()];
 function intervaloPeriodo(){
   const P = S.dash || (S.dash = {periodo:'3', de:'', ate:'', busca:'', mesVenc: hojeISO().slice(0,7)});
   const ref = mesAtual();
@@ -818,18 +833,25 @@ async function marcarRecebida(f, desfazer){
   await gravarFatura(novo); toast(`${S.clientes[f.clienteId]?.nome}: ${desfazer ? 'pagamento desfeito' : 'pagamento registrado'}`);
 }
 async function marcarCemig(f, desfazer){
+  if (f.ccId){ const c = S.contasCemig[f.ccId]; if (!c) return;
+    const novo = {...c, situacao: desfazer ? 'aberta' : 'paga'}; if (desfazer) delete novo.pagaEm; else novo.pagaEm = new Date().toISOString();
+    S.contasCemig[c.id] = novo; await gravar('contasCemig', c.id, novo); if (!S.db) render();
+    toast(`Conta Cemig de ${S.clientes[f.clienteId]?.nome}: ${desfazer ? 'voltou para em aberto' : 'paga'}`); return; }
   const novo = {...f}; if (desfazer) delete novo.cemigPagaEm; else novo.cemigPagaEm = new Date().toISOString();
   await gravarFatura(novo); toast(`Conta Cemig de ${S.clientes[f.clienteId]?.nome}: ${desfazer ? 'voltou para em aberto' : 'paga'}`);
 }
 const botaoRec = f => !ehCobravel(f) ? '' : f.status === 'paga'
   ? `<button class="mini-btn feito" data-rec="${f.id}" data-desf="1" title="Toque para desfazer">${ic('check')} Recebido</button>`
   : `<button class="mini-btn" data-rec="${f.id}">Marcar recebido</button>`;
-const botaoCem = f => cemigPaga(f)
+const acharConta = id => S.faturas[id] || contasComoFaturas().find(f => f.id === id);
+const botaoCem = f => (!cemigPaga(f) && ['retida','processando'].includes(f.situacaoCemig))
+  ? `<span class="chip cinza" title="A Cemig ainda não liberou esta conta para pagamento">${SIT_CEMIG[f.situacaoCemig]}</span>`
+  : cemigPaga(f)
   ? `<button class="mini-btn feito" data-cem="${f.id}" data-desf="1" title="Toque para desfazer">${ic('check')} Cemig paga</button>`
   : `<button class="mini-btn" data-cem="${f.id}">Cemig paga</button>`;
 function ligarBotoesPagamento(raiz){
   $$('[data-rec]', raiz).forEach(b => b.onclick = e => { e.stopPropagation(); b.disabled = true; marcarRecebida(S.faturas[b.dataset.rec], !!b.dataset.desf); });
-  $$('[data-cem]', raiz).forEach(b => b.onclick = e => { e.stopPropagation(); b.disabled = true; marcarCemig(S.faturas[b.dataset.cem], !!b.dataset.desf); });
+  $$('[data-cem]', raiz).forEach(b => b.onclick = e => { e.stopPropagation(); b.disabled = true; marcarCemig(acharConta(b.dataset.cem), !!b.dataset.desf); });
 }
 
 function graficoMeses(meses, dados){
@@ -876,14 +898,16 @@ function telaPainel(v){
   intervaloPeriodo(); const P = S.dash;
   const [de, ate] = intervaloPeriodo();
   const q = (P.busca||'').trim().toLowerCase();
-  const todas = Object.values(S.faturas).filter(f => f.status !== 'cancelada' && casaBusca(f, q));
+  const todas = todasContas().filter(f => f.status !== 'cancelada' && casaBusca(f, q));
   const fs = todas.filter(f => f.competencia >= de && f.competencia <= ate);
   const cob = fs.filter(ehCobravel);
   const soma = (arr, fn) => r2(arr.reduce((s,f)=>s+(fn(f)||0),0));
   const recebido = soma(cob.filter(f=>f.status==='paga'), f=>f.calc.valorAPagar);
   const vencido = soma(cob.filter(estaVencida), f=>f.calc.valorAPagar);
   const aberto = soma(cob.filter(f=>f.status!=='paga' && !estaVencida(f)), f=>f.calc.valorAPagar);
-  const cemAberto = fs.filter(f=>!cemigPaga(f) && f.cemig?.total>0);
+  const cemAberto = fs.filter(cemigEmAberto);
+  const cemAtras = todas.filter(cemigAtrasada).sort((a,b)=>a.cemig.vencimento.localeCompare(b.cemig.vencimento));
+  const atrasPorPag = {}; cemAtras.forEach(f => { const k = quemPagaCemig(f); (atrasPorPag[k] = atrasPorPag[k] || []).push(f); });
   // meses do gráfico
   let meses = [...new Set(fs.map(f=>f.competencia))].sort();
   const dadosMes = meses.map(m => { const doMes = cob.filter(f=>f.competencia===m);
@@ -891,7 +915,7 @@ function telaPainel(v){
              aberto: soma(doMes.filter(f=>f.status!=='paga'&&!estaVencida(f)), f=>f.calc.valorAPagar) }; });
   // pagadores das contas Cemig
   const pag = {}; fs.filter(f=>f.cemig?.total>0).forEach(f => { const k = quemPagaCemig(f); const o = pag[k] || (pag[k] = {nome:k, total:0, aberto:0, n:0});
-    o.total = r2(o.total + f.cemig.total); o.n++; if (!cemigPaga(f)) o.aberto = r2(o.aberto + f.cemig.total); });
+    o.total = r2(o.total + f.cemig.total); o.n++; if (cemigEmAberto(f)) o.aberto = r2(o.aberto + f.cemig.total); });
   const pagadores = Object.values(pag).sort((a,b)=>b.total-a.total);
   // devedores (todas as datas, respeitando a busca)
   const dev = {}; todas.filter(estaVencida).forEach(f => { const o = dev[f.clienteId] || (dev[f.clienteId] = {id:f.clienteId, total:0, n:0, maisAntiga:f.vencimento});
@@ -903,7 +927,7 @@ function telaPainel(v){
   const itensVenc = [];
   todas.forEach(f => {
     if (ehCobravel(f) && (f.vencimento||'').startsWith(mv)) itensVenc.push({dia:f.vencimento, tipo:'rec', f, valor:f.calc.valorAPagar});
-    if (f.cemig?.total > 0 && (f.cemig.vencimento||'').startsWith(mv)) itensVenc.push({dia:f.cemig.vencimento, tipo:'cem', f, valor:f.cemig.total});
+    if (f.cemig?.total > 0 && (f.cemig.vencimento||'').startsWith(mv) && f.situacaoCemig !== 'retida') itensVenc.push({dia:f.cemig.vencimento, tipo:'cem', f, valor:f.cemig.total});
   });
   const porDia = {}; itensVenc.forEach(i => (porDia[i.dia] = porDia[i.dia] || []).push(i));
   const hoje = hojeISO();
@@ -921,7 +945,7 @@ function telaPainel(v){
     <div class="kpi"><small>A receber</small><b>${brl(aberto)}</b><span>${cob.filter(f=>f.status!=='paga'&&!estaVencida(f)).length} faturas no prazo</span></div>
     <div class="kpi alerta-kpi"><small>${ic('alerta')} Vencido sem pagamento</small><b>${brl(vencido)}</b><span>${cob.filter(estaVencida).length} faturas atrasadas</span></div>
     <div class="kpi"><small>${ic('check')} Recebido</small><b>${brl(recebido)}</b><span>${cob.filter(f=>f.status==='paga').length} de ${cob.length} faturas</span></div>
-    <div class="kpi"><small>Contas Cemig a pagar</small><b>${brl(soma(cemAberto, f=>f.cemig.total))}</b><span>${cemAberto.length} em aberto</span></div>
+    <div class="kpi"><small>Contas Cemig a pagar</small><b>${brl(soma(cemAberto, f=>f.cemig.total))}</b><span>${cemAberto.length} em aberto${cemAtras.length?` · <b class="neg">${cemAtras.length} atrasada${cemAtras.length>1?'s':''}</b>`:''}</span></div>
   </div>
   ${cardRotina()}
   ${pendenciasMes()}
@@ -941,7 +965,14 @@ function telaPainel(v){
             <span class="v">${brl(i.valor)}</span>${i.tipo==='rec'?botaoRec(i.f):botaoCem(i.f)}</div>`; }).join('')}</div>`; }).join('')}</div>`
     : '<p class="muted">Nenhum vencimento registrado neste mês.</p>'}
   </section>
-  <section class="card"><h2>Quem está devendo <span class="n">${devedores.length}</span></h2>
+  <section class="card"><h2>Contas Cemig atrasadas <span class="n">${cemAtras.length}</span></h2>
+    ${cemAtras.length ? `<p class="small">Total em atraso: <b class="neg">${brl(r2(cemAtras.reduce((s,f)=>s+f.cemig.total,0)))}</b>. Agrupado por quem paga a conta.</p>
+      ${Object.entries(atrasPorPag).sort((a,b)=>b[1].length-a[1].length).map(([pg, arr]) => `<details ${Object.keys(atrasPorPag).length<=3?'open':''}><summary><b>${esc(pg)}</b> · ${arr.length} conta${arr.length>1?'s':''} · ${brl(r2(arr.reduce((s,f)=>s+f.cemig.total,0)))}</summary>
+        ${arr.map(f => { const c = S.clientes[f.clienteId]||{}; return `<div class="venc-item atrasado"><span class="quem"><b>${esc(c.nome||'?')}</b><small>${compLabel(f.competencia)} · venceu ${isoParaBR(f.cemig.vencimento)} (há ${dias(f.cemig.vencimento)} dias)${f.ccId && S.contasCemig[f.ccId]?.consultaEm ? ` · última conferência no portal ${esc(S.contasCemig[f.ccId].consultaEm.slice(0,5))}` : ''}${f.pdfLink?` · <a href="${esc(f.pdfLink)}" target="_blank" rel="noopener">PDF</a>`:''}</small></span><span class="v">${brl(f.cemig.total)}</span>${botaoCem(f)}</div>`; }).join('')}</details>`).join('')}`
+      : `<p class="ok">${ic('checkc')} Nenhuma conta Cemig atrasada.</p>`}
+    ${(()=>{ const ret = todas.filter(f => !cemigPaga(f) && f.situacaoCemig==='retida'); return ret.length ? `<p class="muted small">${ret.length} conta${ret.length>1?'s':''} retida${ret.length>1?'s':''} na Cemig (${brl(r2(ret.reduce((s,f)=>s+(f.cemig.total||0),0)))}), ainda sem liberação para pagar.</p>` : ''; })()}
+  </section>
+  <section class="card"><h2>Clientes devendo à Seltec <span class="n">${devedores.length}</span></h2>
     ${devedores.length ? `<ul class="lista">${devedores.map(d => { const c = S.clientes[d.id]||{};
       return `<li class="lin"><span><b>${esc(c.nome||'?')}</b><span>${d.n} fatura${d.n>1?'s':''} vencida${d.n>1?'s':''} · a mais antiga há ${dias(d.maisAntiga)} dias${c.whatsapp?'':' · sem WhatsApp'}</span></span>
         <span class="acoes" style="margin:0"><b class="neg">${brl(d.total)}</b><button class="btn sec mini" data-busca="${esc(c.nome)}">Ver</button></span></li>`; }).join('')}</ul>`
@@ -976,7 +1007,7 @@ function cardRotina(){
   </section>`;
 }
 function pendenciasMes(){
-  const comp = mesAtual(); const fs = Object.values(S.faturas).filter(f=>f.competencia===comp && f.status!=='cancelada');
+  const comp = mesAtual(); const fs = todasContas().filter(f=>f.competencia===comp && f.status!=='cancelada');
   const faltam = listaClientes().filter(c => !fs.some(f=>f.clienteId===c.id) && c.tipo!=='sem_fatura');
   const naoEnv = fs.filter(f=>f.status==='gerada' && ehCobravel(f));
   if (!faltam.length && !naoEnv.length) return '';
@@ -994,7 +1025,7 @@ function historicoBusca(todas, de, ate){
     <p class="small">${clientes.length} cliente${clientes.length!==1?'s':''} · ${fs.length} conta${fs.length!==1?'s':''} · faturas Seltec ${brl(totSel)} · contas Cemig ${brl(totCem)}</p>
     ${meses.map(m => { const doMes = fs.filter(f=>f.competencia===m);
       return `<div class="hist-mes"><h4>${compLabel(m)}</h4>${doMes.map(f => { const c = S.clientes[f.clienteId]||{};
-        return `<div class="venc-item"><span class="quem"><b>${esc(c.nome)}</b><small>Seltec: ${f.calc?.tipo==='so_cemig'?'sem cobrança':`${brl(f.calc?.valorAPagar)} · ${STATUS[estaVencida(f)?'vencida':f.status]?.[0]||f.status} · vence ${isoParaBR(f.vencimento)}`}<br>Cemig: ${brl(f.cemig?.total)} · vence ${isoParaBR(f.cemig?.vencimento)} · paga por ${esc(quemPagaCemig(f))}</small></span>
+        return `<div class="venc-item"><span class="quem"><b>${esc(c.nome)}</b><small>Seltec: ${f.calc?.tipo==='so_cemig'?'sem cobrança':`${brl(f.calc?.valorAPagar)} · ${STATUS[estaVencida(f)?'vencida':f.status]?.[0]||f.status} · vence ${isoParaBR(f.vencimento)}`}<br>Cemig: ${brl(f.cemig?.total)} · vence ${isoParaBR(f.cemig?.vencimento)} · paga por ${esc(quemPagaCemig(f))}${cemigPaga(f)?' · paga':cemigAtrasada(f)?' · <b class="neg">atrasada</b>':f.situacaoCemig&&SIT_CEMIG[f.situacaoCemig]?' · '+SIT_CEMIG[f.situacaoCemig]:''}${f.pdfLink?` · <a href="${esc(f.pdfLink)}" target="_blank" rel="noopener">PDF</a>`:''}</small></span>
           <span class="col-bot">${botaoRec(f)}${f.cemig?.total>0?botaoCem(f):''}</span></div>`; }).join('')}</div>`; }).join('') || '<p class="muted">Nada encontrado no período.</p>'}
   </section>`;
 }
@@ -1417,7 +1448,7 @@ function telaClientes(v){
   <input class="busca" id="busca" placeholder="Buscar por nome ou UC" value="${esc(S.busca||'')}">
   <div class="grade-cli">${cs.map(c => { const ult = faturasDoCliente(c.id)[0]; return `
     <button class="card cli" data-ed="${c.id}">
-      <div class="lin"><b>${esc(c.nome)}</b><span class="chip ${c.tipo==='permuta'?'roxo':c.tipo==='venda'?'verde':'cinza'}">${TIPOS[c.tipo]||c.tipo}</span></div>
+      <div class="lin"><b>${esc(c.nome)}</b><span class="chip ${c.tipo==='permuta'?'roxo':c.tipo==='venda'?'verde':'cinza'}">${c.usina?'Usina':TIPOS[c.tipo]||c.tipo}</span></div>
       <small>UC ${esc(c.uc||'—')}${c.instalacao?` · inst. ${esc(c.instalacao)}`:''}</small>
       <small>${c.whatsapp?`WhatsApp ${esc(c.whatsapp)}`:'<span class="falta">sem WhatsApp</span>'} · ${c.tipo==='venda'?`desconto ${c.desconto??30}%`:c.tipo==='permuta'?`limite ${c.permuta?.base==='kwh'?fmtN(c.permuta?.limite)+' kWh':brl(c.permuta?.limite)}`:''}</small>
       <small>${ult?`Última fatura: ${compLabel(ult.competencia)} · ${brl(ult.calc?.valorAPagar)}`:'Sem faturas'}</small>
@@ -1870,7 +1901,7 @@ async function codigoDaPlataforma(){
   try { const r = await fetch(location.href.split('#')[0]); if (r.ok){ const t = await r.text(); if (t.includes('Seltec')) return t; } } catch(e){}
   return null;
 }
-const dadosJson = () => JSON.stringify({exportadoEm:new Date().toISOString(), clientes:S.clientes, faturas:S.faturas, cfg:S.cfg}, null, 1);
+const dadosJson = () => JSON.stringify({exportadoEm:new Date().toISOString(), clientes:S.clientes, faturas:S.faturas, contasCemig:S.contasCemig, cfg:S.cfg}, null, 1);
 
 async function salvarArquivo(nome, data){
   if (S.downloads){
@@ -1926,7 +1957,7 @@ async function baixarBackup(botao){
     if (cem) z.file(`pdfs/${f.id}_cemig.pdf`, cem);
   }
   if (S.cfg.logoId){ const l = await bytesDeAsset(S.cfg.logoId); if (l) z.file('logo.bin', l); }
-  z.file('dados.json', JSON.stringify({tipo:'backup-seltec', versao:1, exportadoEm:new Date().toISOString(), clientes:S.clientes, faturas:S.faturas, cfg:S.cfg}, null, 1));
+  z.file('dados.json', JSON.stringify({tipo:'backup-seltec', versao:1, exportadoEm:new Date().toISOString(), clientes:S.clientes, faturas:S.faturas, contasCemig:S.contasCemig, cfg:S.cfg}, null, 1));
   z.file('LEIA-ME.txt', `Backup da plataforma Seltec · Faturas e Permutas\nGerado em ${new Date().toLocaleString('pt-BR')}\n${Object.keys(S.clientes).length} clientes, ${fs.length} faturas.\nPara restaurar: abra a plataforma, vá em Ajustes → Restaurar backup e escolha este arquivo .zip.`);
   prog('Compactando…');
   const blob = await z.generateAsync({type:'blob', compression:'DEFLATE'});
@@ -1939,9 +1970,9 @@ async function restaurarBackup(arq){
     if (/\.zip$/i.test(arq.name)){ z = await JSZip.loadAsync(arq); const dj = z.file('dados.json'); if (!dj) throw new Error('sem dados.json'); dados = JSON.parse(await dj.async('string')); }
     else dados = JSON.parse(await arq.text());
   } catch(e){ toast('Arquivo de backup inválido.', 'erro'); return; }
-  const cs = Object.values(dados.clientes||{}), fs = Object.values(dados.faturas||{});
+  const cs = Object.values(dados.clientes||{}), fs = Object.values(dados.faturas||{}), ccs = Object.values(dados.contasCemig||{});
   const comPdf = z ? Object.keys(z.files).filter(n=>n.startsWith('pdfs/')).length : 0;
-  if (!await confirmar(`Restaurar ${cs.length} clientes e ${fs.length} faturas${comPdf?` com ${comPdf} PDFs`:''}? Registros com o mesmo código serão substituídos.${dados.cfg?' Os ajustes da empresa também serão restaurados.':''}`, 'Restaurar')) return;
+  if (!await confirmar(`Restaurar ${cs.length} clientes, ${fs.length} faturas${ccs.length?` e ${ccs.length} contas Cemig`:''}${comPdf?` com ${comPdf} PDFs`:''}? Registros com o mesmo código serão substituídos.${dados.cfg?' Os ajustes da empresa também serão restaurados.':''}`, 'Restaurar')) return;
   const aviso = document.createElement('div'); aviso.className = 'toast'; aviso.textContent = 'Restaurando…'; $('#toasts').appendChild(aviso);
   try {
     for (const c of cs) await gravarCliente(c);
@@ -1958,6 +1989,8 @@ async function restaurarBackup(arq){
       }
       await gravarFatura(f);
     }
+    let j = 0;
+    for (const c of ccs){ aviso.textContent = `Restaurando contas Cemig… ${++j}/${ccs.length}`; S.contasCemig[c.id] = c; await gravar('contasCemig', c.id, c); }
     if (dados.cfg){
       const cfg = {...dados.cfg};
       const logo = z && z.file('logo.bin');
@@ -1965,7 +1998,7 @@ async function restaurarBackup(arq){
       else delete cfg.logoId;
       await gravar('config','empresa', cfg); S.cfg = {...CFG_PADRAO, ...cfg};
     }
-    toast(`Backup restaurado: ${cs.length} clientes e ${fs.length} faturas`);
+    toast(`Restaurado: ${cs.length} clientes, ${fs.length} faturas${ccs.length?`, ${ccs.length} contas Cemig`:''}`);
   } catch(e){ toast('A restauração parou no meio. Tente de novo com o mesmo arquivo.', 'erro'); }
   finally { aviso.remove(); render(); }
 }
